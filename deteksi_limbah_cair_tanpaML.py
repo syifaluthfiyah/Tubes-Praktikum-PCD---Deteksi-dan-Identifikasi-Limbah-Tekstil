@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from skimage import feature, filters, measure
+from skimage.feature.texture import graycomatrix, graycoprops
 from skimage.color import rgb2gray, rgb2hsv
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -19,20 +20,20 @@ class FeatureExtractor:
     def __init__(self):
         pass # Scaler not needed without ML training
     
-    def extract_color_features(self, image):
+    def extract_color_features(self, image, color_bins=32):
         """Ekstraksi fitur warna (histogram RGB dan HSV)"""
         # Convert to HSV
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         
         # RGB histogram
-        hist_r = cv2.calcHist([image], [0], None, [32], [0, 256])
-        hist_g = cv2.calcHist([image], [1], None, [32], [0, 256])
-        hist_b = cv2.calcHist([image], [2], None, [32], [0, 256])
+        hist_r = cv2.calcHist([image], [0], None, [color_bins], [0, 256])
+        hist_g = cv2.calcHist([image], [1], None, [color_bins], [0, 256])
+        hist_b = cv2.calcHist([image], [2], None, [color_bins], [0, 256])
         
         # HSV histogram
-        hist_h = cv2.calcHist([hsv], [0], None, [32], [0, 180])
-        hist_s = cv2.calcHist([hsv], [1], None, [32], [0, 256])
-        hist_v = cv2.calcHist([hsv], [2], None, [32], [0, 256])
+        hist_h = cv2.calcHist([hsv], [0], None, [color_bins], [0, 180])
+        hist_s = cv2.calcHist([hsv], [1], None, [color_bins], [0, 256])
+        hist_v = cv2.calcHist([hsv], [2], None, [color_bins], [0, 256])
         
         # Mean RGB dan HSV
         mean_rgb = np.mean(image, axis=(0, 1))
@@ -90,26 +91,26 @@ class FeatureExtractor:
         
         return shape_features
     
-    def extract_texture_features(self, image):
+    def extract_texture_features(self, image, lbp_points=24, lbp_radius=8):
         """Ekstraksi fitur tekstur menggunakan LBP dan GLCM"""
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         
         # LBP (Local Binary Pattern)
-        lbp = feature.local_binary_pattern(gray, 24, 8, method='uniform')
-        lbp_hist, _ = np.histogram(lbp.ravel(), bins=26, range=(0, 25))
+        lbp = feature.local_binary_pattern(gray, lbp_points, lbp_radius, method='uniform')
+        lbp_hist, _ = np.histogram(lbp.ravel(), bins=lbp_points + 2, range=(0, lbp_points + 1))
         lbp_hist = lbp_hist.astype(float)
         lbp_hist /= (lbp_hist.sum() + 1e-7)
         
-        # GLCM features
-        glcm = feature.greycomatrix(gray, [1], [0, 45, 90, 135], levels=256, symmetric=True, normed=True)
+        # GLCM (Grey Level Co-occurrence Matrix)
+        glcm = graycomatrix(gray, [1], [0, 45, 90, 135], levels=256, symmetric=True, normed=True)
         
         # GLCM properties
-        contrast = feature.greycoprops(glcm, 'contrast').flatten()
-        dissimilarity = feature.greycoprops(glcm, 'dissimilarity').flatten()
-        homogeneity = feature.greycoprops(glcm, 'homogeneity').flatten()
-        energy = feature.greycoprops(glcm, 'energy').flatten()
-        correlation = feature.greycoprops(glcm, 'correlation').flatten()
+        contrast = graycoprops(glcm, 'contrast').flatten()
+        dissimilarity = graycoprops(glcm, 'dissimilarity').flatten()
+        homogeneity = graycoprops(glcm, 'homogeneity').flatten()
+        energy = graycoprops(glcm, 'energy').flatten()
+        correlation = graycoprops(glcm, 'correlation').flatten()
         
         # Statistical features
         mean_val = np.mean(gray)
@@ -124,13 +125,30 @@ class FeatureExtractor:
         
         return texture_features
     
-    def extract_all_features(self, image):
-        """Ekstraksi semua fitur"""
-        color_feat = self.extract_color_features(image)
-        shape_feat = self.extract_shape_features(image)
-        texture_feat = self.extract_texture_features(image)
+    def extract_all_features(self, image, feature_settings):
+        """Ekstraksi semua fitur berdasarkan pengaturan yang dipilih"""
+        all_features_list = []
+
+        if feature_settings.get('extract_color', True):
+            color_feat = self.extract_color_features(image, feature_settings.get('color_bins', 32))
+            all_features_list.append(color_feat)
         
-        return np.concatenate([color_feat, shape_feat, texture_feat])
+        if feature_settings.get('extract_shape', True):
+            shape_feat = self.extract_shape_features(image)
+            all_features_list.append(shape_feat)
+        
+        if feature_settings.get('extract_texture', True):
+            texture_feat = self.extract_texture_features(
+                image, 
+                feature_settings.get('lbp_points', 24), 
+                feature_settings.get('lbp_radius', 8)
+            )
+            all_features_list.append(texture_feat)
+        
+        if not all_features_list:
+            return np.array([]) # Return empty array if no features selected
+
+        return np.concatenate(all_features_list)
 
 class TextileWasteDetector(QMainWindow):
     def __init__(self):
@@ -138,6 +156,17 @@ class TextileWasteDetector(QMainWindow):
         self.feature_extractor = FeatureExtractor()
         self.current_image = None
         self.processed_image = None
+        self.feature_settings = { # Default settings
+            'extract_color': True,
+            'extract_shape': True,
+            'extract_texture': True,
+            'color_bins': 32,
+            'lbp_radius': 8,
+            'lbp_points': 24,
+            'min_object_area': 0.7,
+            'image_size': 224,
+            'preprocessing_method': "None"
+        }
         
         self.initUI()
         
@@ -517,7 +546,8 @@ class TextileWasteDetector(QMainWindow):
         """Update detailed analysis table for manual mode"""
         # We can still extract features to display some info, even if not used for ML classification
         if self.current_image is not None:
-            features = self.feature_extractor.extract_all_features(self.current_image)
+            # Pass feature settings to the extractor
+            features = self.feature_extractor.extract_all_features(self.current_image, self.feature_settings)
             
             self.analysis_table.setRowCount(1)
             self.analysis_table.setItem(0, 0, QTableWidgetItem("Image_01"))
@@ -534,7 +564,10 @@ class TextileWasteDetector(QMainWindow):
     def open_settings(self):
         """Open settings dialog"""
         dialog = SettingsDialog(self)
-        dialog.exec_()
+        dialog.set_settings(self.feature_settings) # Pass current settings
+        if dialog.exec_():
+            self.feature_settings = dialog.get_current_settings() # Get updated settings
+            self.log_message("Detection settings updated.")
     
     def clear_log(self):
         """Clear processing log"""
@@ -615,6 +648,19 @@ class SettingsDialog(QDialog):
         self.lbp_points.setRange(8, 32)
         self.lbp_points.setValue(24)
         feature_layout.addRow("LBP Points:", self.lbp_points)
+        
+        # Feature selection checkboxes
+        self.extract_color_checkbox = QCheckBox("Ekstraksi Fitur Warna")
+        self.extract_color_checkbox.setChecked(True)
+        feature_layout.addRow(self.extract_color_checkbox)
+        
+        self.extract_shape_checkbox = QCheckBox("Ekstraksi Fitur Bentuk")
+        self.extract_shape_checkbox.setChecked(True)
+        feature_layout.addRow(self.extract_shape_checkbox)
+        
+        self.extract_texture_checkbox = QCheckBox("Ekstraksi Fitur Tekstur")
+        self.extract_texture_checkbox.setChecked(True)
+        feature_layout.addRow(self.extract_texture_checkbox)
         
         layout.addWidget(feature_group)
         
@@ -698,6 +744,37 @@ class SettingsDialog(QDialog):
         self.confidence_threshold.setValue(0.7) # Re-purposed
         self.image_size.setValue(224)
         self.preprocessing.setCurrentIndex(0)
+
+        # Set checkboxes to default
+        self.extract_color_checkbox.setChecked(True)
+        self.extract_shape_checkbox.setChecked(True)
+        self.extract_texture_checkbox.setChecked(True)
+
+    def get_current_settings(self):
+        """Return current settings"""
+        return {
+            'color_bins': self.color_bins.value(),
+            'lbp_radius': self.lbp_radius.value(),
+            'lbp_points': self.lbp_points.value(),
+            'min_object_area': self.confidence_threshold.value(),
+            'image_size': self.image_size.value(),
+            'preprocessing_method': self.preprocessing.currentText(),
+            'extract_color': self.extract_color_checkbox.isChecked(),
+            'extract_shape': self.extract_shape_checkbox.isChecked(),
+            'extract_texture': self.extract_texture_checkbox.isChecked()
+        }
+
+    def set_settings(self, settings):
+        """Set settings from outside"""
+        self.color_bins.setValue(settings.get('color_bins', 32))
+        self.lbp_radius.setValue(settings.get('lbp_radius', 8))
+        self.lbp_points.setValue(settings.get('lbp_points', 24))
+        self.confidence_threshold.setValue(settings.get('min_object_area', 0.7))
+        self.image_size.setValue(settings.get('image_size', 224))
+        self.preprocessing.setCurrentText(settings.get('preprocessing_method', "None"))
+        self.extract_color_checkbox.setChecked(settings.get('extract_color', True))
+        self.extract_shape_checkbox.setChecked(settings.get('extract_shape', True))
+        self.extract_texture_checkbox.setChecked(settings.get('extract_texture', True))
 
 
 # Removed DatasetGeneratorDialog
